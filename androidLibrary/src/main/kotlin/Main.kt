@@ -1,101 +1,117 @@
 package org.example
 
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel.Factory.BUFFERED
 import kotlinx.coroutines.channels.actor
+import kotlinx.coroutines.flow.*
 
 
 fun main(){
 
 }
 
-//Синхронизация между корутинами
-//Пример когда 2 корутины могут обращаться к одному ресурсу
-suspend fun doWork(){
-    var counter = 0
-    coroutineScope {
-        launch(Dispatchers.Default) {
-            counter+=10
-        }
-        launch(Dispatchers.Default) {
-            counter+=10
-        }
+//Flow-реализация реактивных потоков на основе корутин
+//Flow- холодный асинхронный поток данных, который последовательно выдает значения
+//Холодный поток: Flow начинает эмитировать значения только тогда, когда к нему кто-то подписывается (активируется).
+//Flow изначально был толкьо холодным, но затем были реализованы StateFlow and SharedFlow
+
+//Холодный стрим выдает значения только при запуске
+//Горячий стрим начинает работать сразу при создании
+
+//FlowBuilder
+fun build(){
+    //Создание flow из набора значений
+    flowOf(1)
+    flowOf("1", "2", "3")
+    listOf("1", "2").asFlow()
+
+    //Для самостоятельного эмит необходим оператор flow
+    flow{
+        emit(1)//отправляет значение в поток
     }
 }
+//Операторы
+suspend fun oper(){
+    //ПРОМЕЖУТОЧНЫЕ ОПЕРАТОРЫ
+    //принимают входной поток upstream и возвращают выходной поток downstream
+    //создает конечный flow, подписывается на входящий flow, получает все данные из входящего flow, выполняет операции с данными и emit их в выходной поток
+    //map преобразует каждое значение Flow
+    flowOf(1, 2, 3).map { it*2 }
+    //filter фильтрует значение согласно условию
+    flowOf(1,2,3).filter { it%2==0 }
+    //take берет только заданное количество значений
+    flowOf(1,2,3).take(2)
 
-//Принципы синхронизации
-//Только один поток может иметь доступ в критическую секцию в определнный момент времени
-//Либо за счет ограничения доступа, либо за счет обеспечения очередности
+    //Терминальные оператор(suspend функции которые должны быть запущены в корутине в рамках какого-то scope)
+    //Некоторые терминальные операторы не suspend функции, так как являются удобными обертками над suspend функциями
+    //collect финальный оператор, который активирует поток и обрабатывает каждое значение(подписчик на поток)
+    flowOf(1, 2, 3).collect { println(it) }
+}
 
-//Снятие блокировки должно происходить на том же потоке, на котором она была захвачена
-//Иначе ресурс зависнет навсегда
+//чтобы для collect не создавать какждый раз корутину можно использвоать lauchin которая сама это сделает
+suspend fun doLaunch(){
+    flow{
+        emit("Hello")
+    }
+        .filter { it=="Hello" }
+        .launchIn(CoroutineScope(CoroutineName("Scope Flow")))
+}
 
-//Так как suspend функции могут происходить на разных потоках
-//Следовательно между захватом и снятие блокировки не должно быть вызовов suspend функций
+//Flow может быть бесконечным и эмитить значения пока его не остановят
 
-//Критическая секция-участок исполняемого кода программы, в котором производится доступ к общему ресурсу
-//не должен быть одновременно использован более чем одним потоком
+//Buffer позволяет собирать все полученные значения из flow и затем передает их коллектору, когда он будет говто их обработать
+fun dodl(){
+    flow<String> {  }.buffer(
+        capacity = BUFFERED,
+        onBufferOverflow = BufferOverflow.SUSPEND
+    )
+}
 
+//Смена контекста выполнения для upstream
+//flowOn меняет контекст для всех операторов цепочки до предыдущего вызова flowOn
+//Context Preservation - особенность Flow, которая требует сохранения контекста коллектора
+fun change(){
+    flow<String> {  }.flowOn(Dispatchers.IO)
+}
 
-//Как обеспечить последовательность
-//Один из вариантов создание своего dispatcher который будет работать на одном выделенном потоке
-@OptIn(ExperimentalCoroutinesApi::class, DelicateCoroutinesApi::class)
-suspend fun doSome(){
-    val counterContext = newSingleThreadContext("Counter")
-    var counter = 0
-    val scope = CoroutineScope(CoroutineName("Scope 1"))
-    val jobs = List(100){
-        scope.launch(start = CoroutineStart.LAZY) {
-            repeat(1_000){
-                withContext(counterContext){
-                    counter+=10
-                }
+//реализовать оператор который эмитит только изменившееся значения
+fun <T> Flow<T>.unique(): Flow<T> =flow {
+        var lastValue: Any? = NoValue
+        collect{ value: T ->
+            if(lastValue!=value){
+                lastValue=value
+                emit(value)
             }
         }
     }
-    jobs.joinAll()
-    counterContext.close()//обязательно закрыть CoroutineContext после того как он не нужен
+private object NoValue
+
+//Exception Transparency-ошибки в выходном потоке всегда долзны выходить до коллектора
+fun except(): Flow<Int> = flow {
+    emit(1)
+    emit(2)
+    throw Exception("An error occurred!") // Искусственное исключение
+    emit(3)
+}.catch { e: Throwable ->
+    println("Caught exception: ${e.message}")
 }
 
-//Channel для синхронизации
-//Синхронизация через коммуникацию
+//Горячий Flow
 
-//Вариант с actor
-// Определяем различные типы сообщений для работы с общим ресурсом
-sealed class CounterMsg{
-    class Increment: CounterMsg()
-    class GetValue(val response: CompletableDeferred<Int>): CounterMsg()
+//SharedFlow-emit значение всем его подписчикам(эмиттит значения сразу при создании)
+//бесконечный поток данных
+//может быть множество подписчиков
+//не имеет контекста выполнения(flowOn не работает)
+//бывает также MutableSharedFlow которые позволяет и получать и отправлять значения
+fun shared(){
+    //replay cache-элементы доставляются всем новым подписчикам
+    //extra buffer-элементы сохраняются при наличии подписчиков, когда они не могут быть доставлены сразу же(очищается при отсутсвии подписчиков)
+    val flow: Flow<String> = MutableSharedFlow( replay = 5, extraBufferCapacity = 4)
 }
-// Функция для создания актора, управляющего доступом к счетчику
-@OptIn(ObsoleteCoroutinesApi::class)
-fun CoroutineScope.counterActor() = actor<CounterMsg>(capacity = BUFFERED) {
-    var counter = 0 // общий ресурс, защищенный актером
-    for (msg in channel) { // обрабатываем каждое сообщение по очереди
-        when (msg) {
-            is CounterMsg.Increment -> counter++
-            is CounterMsg.GetValue -> msg.response.complete(counter)
-        }
-    }
-}
-fun someWork() = runBlocking {
-    // Создаем актер для управления счетчиком
-    val counter = counterActor()
 
-    // Запускаем 1000 корутин, каждая из которых увеличивает значение счетчика
-    val jobs = List(1000) {
-        launch {
-            counter.send(CounterMsg.Increment())
-        }
-    }
+//StateFlow-частный случай SharedFlow, хранит одно значение и доставляет его всем своим подписчикам
+//новое значение будет доставляться только если оно изменилось
+//StateFlow ~ SharedFlow<T>(replay = 1, extraBufferCapacity = 0, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
-    // Ждем завершения всех корутин
-    jobs.forEach { it.join() }
 
-    // Получаем текущее значение счетчика
-    val response = CompletableDeferred<Int>()
-    counter.send(CounterMsg.GetValue(response))
-    println("Final counter value: ${response.await()}")
-
-    // Закрываем актор
-    counter.close()
-}
